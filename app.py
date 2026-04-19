@@ -7,6 +7,12 @@ st.set_page_config(page_title="Analisa Saham", layout="wide")
 st.title("📈 Aplikasi Analisa Saham Real-Time")
 
 # Input saham
+symbol = st.text_input("Masukkan kode saham", "BBCA.JK").upper()
+
+if not symbol:
+    st.warning("Silakan masukkan kode saham terlebih dahulu")
+    st.stop()
+
 data = yf.download(symbol, period="6mo", interval="1d")
 
 # Perbaiki struktur kolom
@@ -48,7 +54,6 @@ else:
     last_rsi = data['RSI'].iloc[-1]
 
     st.subheader("📌 Analisa Otomatis")
-
     st.write(f"Harga terakhir: {last_price:.2f}")
     st.write(f"RSI: {last_rsi:.2f}")
 
