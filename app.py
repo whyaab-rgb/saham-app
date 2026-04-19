@@ -1,14 +1,16 @@
 import time
+import textwrap
 import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
+import streamlit.components.v1 as components
 
 st.set_page_config(page_title="High Prob Screener", layout="wide")
 
 # =========================================================
-# PRESET WATCHLIST
+# WATCHLIST PRESET
 # =========================================================
 WATCHLISTS = {
     "LQ45 Style": [
@@ -33,7 +35,7 @@ WATCHLISTS = {
 }
 
 # =========================================================
-# STYLE
+# GLOBAL PAGE STYLE
 # =========================================================
 st.markdown("""
 <style>
@@ -59,63 +61,11 @@ h1, h2, h3, h4, h5, h6, p, span, div, label {
     font-size: 12px;
     color: #9db1cc !important;
 }
-.screen-box {
-    border: 1px solid #17324d;
-    border-radius: 10px;
-    padding: 8px;
-    background: #07111b;
-    box-shadow: 0 0 0 1px rgba(255,255,255,0.02);
-    margin-bottom: 12px;
-}
-.screener-title {
-    text-align: center;
-    font-weight: 800;
-    font-size: 13px;
-    color: #eaf2ff;
-    margin-bottom: 6px;
-    letter-spacing: 0.3px;
-}
-.custom-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 11px;
-    overflow: hidden;
-}
-.custom-table th {
-    background: #184574;
-    color: #ffffff;
-    border: 1px solid #2a527b;
-    padding: 5px 3px;
-    text-align: center;
-    white-space: nowrap;
-    font-weight: 800;
-}
-.custom-table td {
-    border: 1px solid #20364e;
-    padding: 4px 3px;
-    text-align: center;
-    white-space: nowrap;
-    font-weight: 700;
-}
-.footer-line {
-    margin-top: 4px;
-    text-align: center;
-    color: #ffd451 !important;
-    font-size: 10px;
-    font-weight: 700;
-}
-.top-strip {
-    border: 1px solid #17324d;
-    border-radius: 10px;
-    background: #07111b;
-    padding: 10px;
-    margin-bottom: 10px;
-}
 </style>
 """, unsafe_allow_html=True)
 
 # =========================================================
-# DATA
+# DATA SOURCE
 # =========================================================
 @st.cache_data(ttl=300)
 def get_ohlcv(symbol: str, period: str = "6mo", interval: str = "1d") -> pd.DataFrame:
@@ -151,14 +101,16 @@ def get_intraday_5m(symbol: str) -> pd.DataFrame:
             auto_adjust=False,
             progress=False
         )
+
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
+
         if df.empty:
             return pd.DataFrame()
+
         return df.dropna().copy()
     except Exception:
         return pd.DataFrame()
-
 
 # =========================================================
 # INDICATORS
@@ -220,12 +172,11 @@ def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return x
 
 
-def latest(series):
+def latest(series: pd.Series) -> float:
     try:
         return float(series.iloc[-1])
     except Exception:
         return np.nan
-
 
 # =========================================================
 # FORMATTERS
@@ -237,30 +188,26 @@ def fmt_price(v):
         return f"{v:,.0f}"
     return f"{v:,.2f}"
 
-
 def fmt_pct(v):
     if pd.isna(v):
         return "-"
     return f"{v:.1f}%"
 
-
-def fmt_num(v):
+def rsi_cell_text(v):
     if pd.isna(v):
         return "-"
     return f"{v:.1f}"
-
 
 def human_value(v):
     if pd.isna(v):
         return "-"
     if v >= 1_000_000_000_000:
-        return f"{v/1_000_000_000_000:.1f}T"
+        return f"{v / 1_000_000_000_000:.1f}T"
     if v >= 1_000_000_000:
-        return f"{v/1_000_000_000:.1f}B"
+        return f"{v / 1_000_000_000:.1f}B"
     if v >= 1_000_000:
-        return f"{v/1_000_000:.1f}M"
+        return f"{v / 1_000_000:.1f}M"
     return f"{v:,.0f}"
-
 
 # =========================================================
 # SIGNAL ENGINE
@@ -268,10 +215,12 @@ def human_value(v):
 def get_phase(df: pd.DataFrame) -> str:
     recent = df.tail(10)
     score = 0
+
     for _, row in recent.iterrows():
         vol_ma20 = row.get("VOL_MA20", np.nan)
         if pd.isna(vol_ma20) or vol_ma20 <= 0:
             continue
+
         if row["Close"] > row["Open"] and row["Volume"] > vol_ma20:
             score += 1
         elif row["Close"] < row["Open"] and row["Volume"] > vol_ma20:
@@ -507,13 +456,16 @@ def build_row(symbol: str, daily_df: pd.DataFrame, intraday_5m: pd.DataFrame):
 @st.cache_data(ttl=300)
 def run_screener(symbols, period, interval):
     rows = []
+
     for symbol in symbols:
         try:
             daily = get_ohlcv(symbol, period=period, interval=interval)
             if daily.empty:
                 continue
+
             intra5 = get_intraday_5m(symbol)
             row = build_row(symbol, daily, intra5)
+
             if row is not None:
                 rows.append(row)
         except Exception:
@@ -524,9 +476,8 @@ def run_screener(symbols, period, interval):
 
     return pd.DataFrame(rows).sort_values("score_total", ascending=False).reset_index(drop=True)
 
-
 # =========================================================
-# COLORS
+# CELL COLORS
 # =========================================================
 def bg_gain(v):
     if pd.isna(v):
@@ -653,49 +604,106 @@ def bg_trend(v):
     }
     return mapping.get(v, "#334155")
 
-
 # =========================================================
-# HTML TABLE
+# HTML TABLE RENDERER
 # =========================================================
-def rsi_cell_text(v):
-    if pd.isna(v):
-        return "-"
-    return f"{v:.1f}"
-
-def table_title_with_sub(title, sub):
-    return f"""
+def make_html_table(df: pd.DataFrame, title: str, sub: str):
+    html = textwrap.dedent(f"""
+    <html>
+    <head>
+    <style>
+    body {{
+        margin: 0;
+        background: #07111b;
+        color: white;
+        font-family: Arial, Helvetica, sans-serif;
+    }}
+    .screen-box {{
+        border: 1px solid #17324d;
+        border-radius: 10px;
+        padding: 8px;
+        background: #07111b;
+        box-sizing: border-box;
+        width: 100%;
+    }}
+    .screener-title {{
+        text-align: center;
+        font-weight: 800;
+        font-size: 13px;
+        color: #eaf2ff;
+        margin-bottom: 4px;
+        letter-spacing: 0.3px;
+    }}
+    .screener-sub {{
+        text-align: center;
+        color: #9fb5d1;
+        font-size: 10px;
+        margin-bottom: 6px;
+    }}
+    .table-wrap {{
+        width: 100%;
+        overflow-x: auto;
+    }}
+    .custom-table {{
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 11px;
+        min-width: 1200px;
+    }}
+    .custom-table th {{
+        background: #184574;
+        color: #ffffff;
+        border: 1px solid #2a527b;
+        padding: 5px 3px;
+        text-align: center;
+        white-space: nowrap;
+        font-weight: 800;
+    }}
+    .custom-table td {{
+        border: 1px solid #20364e;
+        padding: 4px 3px;
+        text-align: center;
+        white-space: nowrap;
+        font-weight: 700;
+    }}
+    .footer-line {{
+        margin-top: 6px;
+        text-align: center;
+        color: #ffd451;
+        font-size: 10px;
+        font-weight: 700;
+    }}
+    </style>
+    </head>
+    <body>
     <div class="screen-box">
       <div class="screener-title">{title}</div>
-      <div style="text-align:center;color:#9fb5d1;font-size:10px;margin-bottom:6px;">{sub}</div>
-    """
-
-def make_html_table(df: pd.DataFrame, title: str, sub: str):
-    html = table_title_with_sub(title, sub)
-    html += """
-        <table class="custom-table">
-            <thead>
-                <tr>
-                    <th>EMITEN</th>
-                    <th>GAIN</th>
-                    <th>WICK</th>
-                    <th>AKSI</th>
-                    <th>SINYAL</th>
-                    <th>RVOL</th>
-                    <th>ENTRY</th>
-                    <th>NOW</th>
-                    <th>TP</th>
-                    <th>SL</th>
-                    <th>PROFIT</th>
-                    <th>%TO TP</th>
-                    <th>RSI SIG</th>
-                    <th>RSI 5M</th>
-                    <th>VAL</th>
-                    <th>FASE</th>
-                    <th>TREND</th>
-                </tr>
-            </thead>
-            <tbody>
-    """
+      <div class="screener-sub">{sub}</div>
+      <div class="table-wrap">
+      <table class="custom-table">
+        <thead>
+          <tr>
+            <th>EMITEN</th>
+            <th>GAIN</th>
+            <th>WICK</th>
+            <th>AKSI</th>
+            <th>SINYAL</th>
+            <th>RVOL</th>
+            <th>ENTRY</th>
+            <th>NOW</th>
+            <th>TP</th>
+            <th>SL</th>
+            <th>PROFIT</th>
+            <th>%TO TP</th>
+            <th>RSI SIG</th>
+            <th>RSI 5M</th>
+            <th>VAL</th>
+            <th>FASE</th>
+            <th>TREND</th>
+          </tr>
+        </thead>
+        <tbody>
+    """)
 
     for _, row in df.iterrows():
         html += f"""
@@ -721,13 +729,15 @@ def make_html_table(df: pd.DataFrame, title: str, sub: str):
         """
 
     html += """
-            </tbody>
-        </table>
-        <div class="footer-line">AKSI=tindakan trader | SINYAL=kondisi pasar | SL≈1xATR | TP≈2xATR | est GC NOW | yfinance mode</div>
+        </tbody>
+      </table>
+      </div>
+      <div class="footer-line">AKSI=tindakan trader | SINYAL=kondisi pasar | SL≈1xATR | TP≈2xATR | est GC NOW | yfinance mode</div>
     </div>
+    </body>
+    </html>
     """
     return html
-
 
 # =========================================================
 # GROUPING
@@ -750,9 +760,8 @@ def split_screeners(df: pd.DataFrame):
 
     return day_trading, rebound, swing
 
-
 # =========================================================
-# DETAIL CHART
+# CHART DETAIL
 # =========================================================
 def show_detail_chart(df: pd.DataFrame, symbol_name: str):
     st.subheader(f"Chart Detail: {symbol_name}")
@@ -770,6 +779,7 @@ def show_detail_chart(df: pd.DataFrame, symbol_name: str):
     fig.add_trace(go.Scatter(x=df.index, y=df["MA50"], mode="lines", name="MA50"))
     fig.add_trace(go.Scatter(x=df.index, y=df["BB_UPPER"], mode="lines", name="BB Upper"))
     fig.add_trace(go.Scatter(x=df.index, y=df["BB_LOWER"], mode="lines", name="BB Lower"))
+
     fig.update_layout(
         height=520,
         template="plotly_dark",
@@ -796,16 +806,18 @@ def show_detail_chart(df: pd.DataFrame, symbol_name: str):
         fig_macd.update_layout(height=280, template="plotly_dark", title="MACD")
         st.plotly_chart(fig_macd, use_container_width=True)
 
-
 # =========================================================
 # HEADER
 # =========================================================
 st.title("HIGH PROB SCREENER V1.2 — DAY TRADING & SWING")
 st.markdown(
-    '<div class="small-note">Versi lebih mirip screener premium: tabel padat, multi-panel, sinyal trader style, ranking, dan chart detail. Data masih memakai yfinance.</div>',
+    '<div class="small-note">Versi perbaikan penuh: tabel custom sudah dirender dengan benar, tidak lagi tampil putih atau menampilkan HTML mentah.</div>',
     unsafe_allow_html=True
 )
 
+# =========================================================
+# SIDEBAR
+# =========================================================
 with st.sidebar:
     st.header("Pengaturan")
     watchlist_name = st.selectbox("Preset Watchlist", list(WATCHLISTS.keys()), index=0)
@@ -837,51 +849,54 @@ if screener_df.empty:
     st.stop()
 
 # =========================================================
-# TOP STRIP
+# TOP METRICS
 # =========================================================
-top1, top2, top3, top4, top5 = st.columns(5)
 top_symbol = screener_df.iloc[0]["symbol"]
 top_score = int(screener_df.iloc[0]["score_total"])
 top_signal = screener_df.iloc[0]["sinyal"]
 top_phase = screener_df.iloc[0]["fase"]
 top_trend = screener_df.iloc[0]["trend"]
 
-top1.metric("TOP PICK", top_symbol)
-top2.metric("TOTAL SCORE", top_score)
-top3.metric("SIGNAL", top_signal)
-top4.metric("PHASE", top_phase)
-top5.metric("TREND", top_trend)
+m1, m2, m3, m4, m5 = st.columns(5)
+m1.metric("TOP PICK", top_symbol)
+m2.metric("TOTAL SCORE", top_score)
+m3.metric("SIGNAL", top_signal)
+m4.metric("PHASE", top_phase)
+m5.metric("TREND", top_trend)
 
 # =========================================================
-# SCREENER BLOCKS
+# SCREENER TABLES
 # =========================================================
 day_df, rebound_df, swing_df = split_screeners(screener_df)
 
-st.markdown(
+components.html(
     make_html_table(
         day_df,
         "HIGH PROB SCREENER V1.2 — DAY TRADING",
         "Momentum cepat | breakout | RVOL | RSI 5M | ATR"
     ),
-    unsafe_allow_html=True
+    height=420,
+    scrolling=True
 )
 
-st.markdown(
+components.html(
     make_html_table(
         rebound_df,
         "HIGH PROB SCREENER V1.2 — BSJP / REBOUND",
         "Buy saat jenuh penurunan | support | lower band | early rebound"
     ),
-    unsafe_allow_html=True
+    height=420,
+    scrolling=True
 )
 
-st.markdown(
+components.html(
     make_html_table(
         swing_df,
         "HIGH PROB SCREENER V1.2 — SWING / TREND",
         "Trend menengah | MA20/MA50 | MACD | akumulasi price-volume"
     ),
-    unsafe_allow_html=True
+    height=420,
+    scrolling=True
 )
 
 # =========================================================
@@ -902,18 +917,18 @@ rank_df.columns = [
 st.dataframe(rank_df, use_container_width=True)
 
 # =========================================================
-# DETAIL
+# DETAIL PANEL
 # =========================================================
 selected_symbol = st.selectbox("Pilih saham untuk detail", screener_df["full_symbol"].tolist())
 selected_row = screener_df[screener_df["full_symbol"] == selected_symbol].iloc[0]
 selected_df = selected_row["daily_df"]
 
-m1, m2, m3, m4, m5 = st.columns(5)
-m1.metric("EMITEN", selected_row["symbol"])
-m2.metric("GAIN", fmt_pct(selected_row["gain"]))
-m3.metric("RVOL", fmt_pct(selected_row["rvol"]))
-m4.metric("RSI 5M", rsi_cell_text(selected_row["rsi_5m"]))
-m5.metric("VAL", human_value(selected_row["val"]))
+d1, d2, d3, d4, d5 = st.columns(5)
+d1.metric("EMITEN", selected_row["symbol"])
+d2.metric("GAIN", fmt_pct(selected_row["gain"]))
+d3.metric("RVOL", fmt_pct(selected_row["rvol"]))
+d4.metric("RSI 5M", rsi_cell_text(selected_row["rsi_5m"]))
+d5.metric("VAL", human_value(selected_row["val"]))
 
 show_detail_chart(selected_df, selected_row["symbol"])
 
@@ -948,7 +963,7 @@ with t4:
     st.write(f"Fase: **{selected_row['fase']}**")
     st.write(f"Value transaksi: **{human_value(selected_row['val'])}**")
 
-st.caption("Catatan: data saat ini memakai yfinance. Kolom seperti broker summary, foreign flow, dan orderbook belum tersedia di versi ini.")
+st.caption("Catatan: data saat ini memakai yfinance. Broker summary, foreign flow, dan orderbook belum tersedia di versi ini.")
 
 # =========================================================
 # AUTO REFRESH
