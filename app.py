@@ -7,13 +7,16 @@ st.set_page_config(page_title="Analisa Saham", layout="wide")
 st.title("📈 Aplikasi Analisa Saham Real-Time")
 
 # Input saham
-symbol = st.text_input("Masukkan kode saham (contoh: BBCA.JK, TLKM.JK)", "BBCA.JK")
-
-# Ambil data
 data = yf.download(symbol, period="6mo", interval="1d")
 
-if data.empty:
-    st.error("Data tidak ditemukan, cek kode saham!")
+# Perbaiki struktur kolom
+if isinstance(data.columns, pd.MultiIndex):
+    data.columns = data.columns.get_level_values(0)
+
+# Validasi
+if data.empty or 'Close' not in data.columns:
+    st.error("Data tidak ditemukan / error dari server")
+    st.stop()
 else:
     # Hitung indikator
     data['MA20'] = data['Close'].rolling(20).mean()
