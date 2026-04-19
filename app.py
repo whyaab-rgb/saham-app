@@ -1,559 +1,873 @@
+import math
+import numpy as np
+import pandas as pd
 import streamlit as st
 import yfinance as yf
-import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="Analisa Saham Real-Time", layout="wide")
+st.set_page_config(page_title="High Prob Screener", layout="wide")
 
-# =========================================
-# WATCHLIST SAHAM
-# =========================================
-DEFAULT_STOCKS = [
+# =========================================================
+# CONFIG
+# =========================================================
+DEFAULT_SYMBOLS = [
     "BBCA.JK", "BMRI.JK", "BBRI.JK", "TLKM.JK", "ASII.JK",
-    "ICBP.JK", "INDF.JK", "MDKA.JK", "ANTM.JK", "PGAS.JK",
-    "ADRO.JK", "ITMG.JK", "UNTR.JK", "EXCL.JK", "CPIN.JK"
+    "ICBP.JK", "INDF.JK", "ANTM.JK", "MDKA.JK", "PGAS.JK",
+    "ADRO.JK", "ITMG.JK", "UNTR.JK", "AKRA.JK", "ESSA.JK",
+    "EXCL.JK", "SMGR.JK", "CPIN.JK", "UNVR.JK", "KLBF.JK",
+    "TPIA.JK", "BRPT.JK", "GOTO.JK", "BUKA.JK", "ISAT.JK",
+    "MAPI.JK", "ERAA.JK", "ACES.JK", "INKP.JK", "TKIM.JK"
 ]
 
-# =========================================
-# HELPER
-# =========================================
+# =========================================================
+# CSS
+# =========================================================
+st.markdown("""
+<style>
+html, body, [class*="css"]  {
+    background-color: #081018;
+    color: white;
+}
+.block-container {
+    padding-top: 1rem;
+    padding-bottom: 1rem;
+    max-width: 98%;
+}
+[data-testid="stAppViewContainer"] {
+    background: linear-gradient(180deg, #081018 0%, #0d1520 100%);
+}
+[data-testid="stSidebar"] {
+    background-color: #0b1220;
+}
+h1, h2, h3, h4, h5, h6, p, span, div, label {
+    color: #e9f1ff !important;
+}
+.small-note {
+    font-size: 12px;
+    color: #9fb4d1 !important;
+}
+.screen-box {
+    border: 1px solid #1b2b43;
+    border-radius: 12px;
+    padding: 10px;
+    background: #09121d;
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.02);
+}
+.screener-title {
+    text-align: center;
+    font-weight: 700;
+    font-size: 14px;
+    color: #e9f1ff;
+    margin-bottom: 8px;
+    letter-spacing: 0.2px;
+}
+.custom-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    overflow: hidden;
+}
+.custom-table th {
+    background: #183b69;
+    color: #ffffff;
+    border: 1px solid #274c7a;
+    padding: 6px 4px;
+    text-align: center;
+    white-space: nowrap;
+}
+.custom-table td {
+    border: 1px solid #203550;
+    padding: 5px 4px;
+    text-align: center;
+    white-space: nowrap;
+    font-weight: 600;
+}
+.legend-line {
+    margin-top: 6px;
+    text-align: center;
+    color: #ffd44d !important;
+    font-size: 12px;
+    font-weight: 700;
+}
+.footer-line {
+    margin-top: 4px;
+    text-align: center;
+    color: #ffd44d !important;
+    font-size: 11px;
+}
+.metric-card {
+    background: #09121d;
+    border: 1px solid #1b2b43;
+    border-radius: 12px;
+    padding: 8px;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# =========================================================
+# DATA SOURCE LAYER
+# =========================================================
 @st.cache_data(ttl=300)
-def load_stock_data(symbol, period="6mo", interval="1d"):
-    df = yf.download(symbol, period=period, interval=interval, auto_adjust=False, progress=False)
+def get_ohlcv(symbol: str, period: str = "6mo", interval: str = "1d") -> pd.DataFrame:
+    df = yf.download(
+        symbol,
+        period=period,
+        interval=interval,
+        auto_adjust=False,
+        progress=False
+    )
 
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
     if df.empty:
-        return df
+        return pd.DataFrame()
 
-    needed = ["Open", "High", "Low", "Close", "Volume"]
-    for col in needed:
+    required = ["Open", "High", "Low", "Close", "Volume"]
+    for col in required:
         if col not in df.columns:
             return pd.DataFrame()
 
     df = df.dropna(subset=["Open", "High", "Low", "Close"]).copy()
-    return calculate_indicators(df)
+    return df
 
-def calculate_indicators(df):
-    df = df.copy()
 
-    # Moving Averages
-    df["MA5"] = df["Close"].rolling(5).mean()
-    df["MA10"] = df["Close"].rolling(10).mean()
-    df["MA20"] = df["Close"].rolling(20).mean()
-    df["MA50"] = df["Close"].rolling(50).mean()
+@st.cache_data(ttl=300)
+def get_intraday_5m(symbol: str) -> pd.DataFrame:
+    try:
+        df = yf.download(
+            symbol,
+            period="5d",
+            interval="5m",
+            auto_adjust=False,
+            progress=False
+        )
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        return df.dropna().copy()
+    except Exception:
+        return pd.DataFrame()
 
-    # EMA
-    df["EMA9"] = df["Close"].ewm(span=9, adjust=False).mean()
-    df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
 
-    # RSI
-    delta = df["Close"].diff()
+# =========================================================
+# ANALYSIS ENGINE
+# =========================================================
+def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    x = df.copy()
+
+    x["MA5"] = x["Close"].rolling(5).mean()
+    x["MA10"] = x["Close"].rolling(10).mean()
+    x["MA20"] = x["Close"].rolling(20).mean()
+    x["MA50"] = x["Close"].rolling(50).mean()
+    x["EMA9"] = x["Close"].ewm(span=9, adjust=False).mean()
+    x["EMA20"] = x["Close"].ewm(span=20, adjust=False).mean()
+
+    delta = x["Close"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
     avg_gain = gain.rolling(14).mean()
     avg_loss = loss.rolling(14).mean()
     rs = avg_gain / avg_loss
-    df["RSI"] = 100 - (100 / (1 + rs))
+    x["RSI"] = 100 - (100 / (1 + rs))
 
-    # MACD
-    ema12 = df["Close"].ewm(span=12, adjust=False).mean()
-    ema26 = df["Close"].ewm(span=26, adjust=False).mean()
-    df["MACD"] = ema12 - ema26
-    df["MACD_SIGNAL"] = df["MACD"].ewm(span=9, adjust=False).mean()
-    df["MACD_HIST"] = df["MACD"] - df["MACD_SIGNAL"]
+    ema12 = x["Close"].ewm(span=12, adjust=False).mean()
+    ema26 = x["Close"].ewm(span=26, adjust=False).mean()
+    x["MACD"] = ema12 - ema26
+    x["MACD_SIGNAL"] = x["MACD"].ewm(span=9, adjust=False).mean()
+    x["MACD_HIST"] = x["MACD"] - x["MACD_SIGNAL"]
 
-    # Bollinger Bands
-    df["BB_MID"] = df["Close"].rolling(20).mean()
-    std20 = df["Close"].rolling(20).std()
-    df["BB_UPPER"] = df["BB_MID"] + 2 * std20
-    df["BB_LOWER"] = df["BB_MID"] - 2 * std20
+    x["BB_MID"] = x["Close"].rolling(20).mean()
+    std20 = x["Close"].rolling(20).std()
+    x["BB_UPPER"] = x["BB_MID"] + 2 * std20
+    x["BB_LOWER"] = x["BB_MID"] - 2 * std20
 
-    # ATR
-    high_low = df["High"] - df["Low"]
-    high_close = np.abs(df["High"] - df["Close"].shift())
-    low_close = np.abs(df["Low"] - df["Close"].shift())
+    x["VOL_MA5"] = x["Volume"].rolling(5).mean()
+    x["VOL_MA20"] = x["Volume"].rolling(20).mean()
+
+    x["SUPPORT20"] = x["Low"].rolling(20).min()
+    x["RESIST20"] = x["High"].rolling(20).max()
+
+    high_low = x["High"] - x["Low"]
+    high_close = np.abs(x["High"] - x["Close"].shift())
+    low_close = np.abs(x["Low"] - x["Close"].shift())
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df["ATR14"] = tr.rolling(14).mean()
+    x["ATR14"] = tr.rolling(14).mean()
 
-    # Volume MA
-    df["VOL_MA5"] = df["Volume"].rolling(5).mean()
-    df["VOL_MA20"] = df["Volume"].rolling(20).mean()
+    x["RET"] = x["Close"].pct_change() * 100
 
-    # Support / Resistance sederhana
-    df["SUPPORT20"] = df["Low"].rolling(20).min()
-    df["RESIST20"] = df["High"].rolling(20).max()
+    body = (x["Close"] - x["Open"]).abs()
+    upper_wick = x["High"] - x[["Open", "Close"]].max(axis=1)
+    lower_wick = x[["Open", "Close"]].min(axis=1) - x["Low"]
+    candle_range = (x["High"] - x["Low"]).replace(0, np.nan)
 
-    # Return harian
-    df["RET"] = df["Close"].pct_change() * 100
+    x["BODY"] = body
+    x["UPPER_WICK"] = upper_wick.clip(lower=0)
+    x["LOWER_WICK"] = lower_wick.clip(lower=0)
+    x["WICK_PCT"] = ((x["UPPER_WICK"] + x["LOWER_WICK"]) / candle_range) * 100
 
-    return df
+    return x
 
-def safe_float(series):
+
+def latest(series):
     try:
         return float(series.iloc[-1])
-    except:
+    except Exception:
+        return np.nan
+
+
+def fmt_price(v):
+    if pd.isna(v):
+        return "-"
+    return f"{v:,.0f}" if v >= 100 else f"{v:,.2f}"
+
+
+def fmt_pct(v):
+    if pd.isna(v):
+        return "-"
+    return f"{v:.1f}%"
+
+
+def transaction_value(close_val, vol_val):
+    if pd.isna(close_val) or pd.isna(vol_val):
+        return 0.0
+    return float(close_val) * float(vol_val)
+
+
+def human_value(v):
+    if v >= 1_000_000_000_000:
+        return f"{v/1_000_000_000_000:.1f}T"
+    if v >= 1_000_000_000:
+        return f"{v/1_000_000_000:.1f}B"
+    if v >= 1_000_000:
+        return f"{v/1_000_000:.1f}M"
+    return f"{v:,.0f}"
+
+
+def get_rsi_signal(rsi, macd, macd_signal):
+    if pd.isna(rsi):
+        return "WAIT"
+    if rsi >= 60 and macd > macd_signal:
+        return "UP"
+    if rsi <= 40 and macd < macd_signal:
+        return "DEAD"
+    if 48 <= rsi <= 55 and macd > macd_signal:
+        return "GOLDEN"
+    return "UP" if rsi >= 50 else "DEAD"
+
+
+def get_trend(close_, ma20, ma50):
+    if pd.isna(close_) or pd.isna(ma20) or pd.isna(ma50):
+        return "NEUTRAL"
+    if close_ > ma20 > ma50:
+        return "BULL"
+    if close_ < ma20 < ma50:
+        return "BEAR"
+    return "NEUTRAL"
+
+
+def get_phase(df: pd.DataFrame):
+    recent = df.tail(10).copy()
+    score = 0
+    for _, row in recent.iterrows():
+        if pd.notna(row["VOL_MA20"]) and row["VOL_MA20"] > 0:
+            if row["Close"] > row["Open"] and row["Volume"] > row["VOL_MA20"]:
+                score += 1
+            elif row["Close"] < row["Open"] and row["Volume"] > row["VOL_MA20"]:
+                score -= 1
+
+    if score >= 4:
+        return "BIG AKUM"
+    if score >= 2:
+        return "AKUM"
+    if score <= -4:
+        return "BIG DIST"
+    if score <= -2:
+        return "DIST"
+    return "NEUTRAL"
+
+
+def get_signal_label(close_, ma20, rsi, macd, macd_signal, vol, vol_ma20, support, resistance):
+    if any(pd.isna(v) for v in [close_, ma20, rsi, macd, macd_signal]):
+        return "WAIT"
+
+    near_support = (not pd.isna(support)) and close_ <= support * 1.05
+    near_resistance = (not pd.isna(resistance)) and close_ >= resistance * 0.98
+    vol_ok = (not pd.isna(vol_ma20)) and vol > vol_ma20
+    bullish = macd > macd_signal
+
+    if near_resistance and bullish and vol_ok and rsi >= 55:
+        return "ON TRACK"
+    if near_support and rsi < 40 and bullish:
+        return "REBOUND"
+    if close_ > ma20 and bullish and vol_ok:
+        return "AKUM"
+    if close_ < ma20 and not bullish and rsi < 45:
+        return "DIST"
+    if rsi > 68 and bullish and vol_ok:
+        return "SUPER"
+    return "WAIT"
+
+
+def get_action_label(signal_label, close_, entry, tp, sl, trend):
+    if signal_label in ["ON TRACK", "AKUM", "SUPER", "REBOUND"]:
+        if not pd.isna(entry) and close_ <= entry * 1.02:
+            return "AT ENTRY"
+        if signal_label == "SUPER":
+            return "SIAP BELI"
+        return "WATCH"
+    if trend == "BULL":
+        return "HOLD"
+    return "WAIT GC"
+
+
+def compute_strategy_scores(df: pd.DataFrame):
+    close_ = latest(df["Close"])
+    ma20 = latest(df["MA20"])
+    ma50 = latest(df["MA50"])
+    ema9 = latest(df["EMA9"])
+    rsi = latest(df["RSI"])
+    macd = latest(df["MACD"])
+    macd_signal = latest(df["MACD_SIGNAL"])
+    volume = latest(df["Volume"])
+    vol_ma5 = latest(df["VOL_MA5"])
+    vol_ma20 = latest(df["VOL_MA20"])
+    support = latest(df["SUPPORT20"])
+    resistance = latest(df["RESIST20"])
+    bb_lower = latest(df["BB_LOWER"])
+
+    # Scalping
+    scalping = 0
+    if close_ > ema9 > ma20:
+        scalping += 3
+    if 55 <= rsi <= 72:
+        scalping += 2
+    if macd > macd_signal:
+        scalping += 2
+    if volume > vol_ma5:
+        scalping += 2
+    if close_ >= resistance * 0.98:
+        scalping += 1
+
+    # BSJP / Buy Saat Jenuh Penurunan
+    bsjp = 0
+    if rsi < 35:
+        bsjp += 3
+    elif 35 <= rsi <= 45:
+        bsjp += 1
+    if close_ <= bb_lower * 1.03:
+        bsjp += 2
+    if close_ <= support * 1.05:
+        bsjp += 2
+    if df["Close"].iloc[-1] > df["Close"].iloc[-2]:
+        bsjp += 1
+    if df["MACD_HIST"].iloc[-1] > 0:
+        bsjp += 2
+
+    # Swing
+    swing = 0
+    if close_ > ma20 > ma50:
+        swing += 3
+    if 50 <= rsi <= 65:
+        swing += 2
+    if macd > macd_signal:
+        swing += 2
+    if volume > vol_ma20:
+        swing += 1
+    if close_ < resistance * 0.92 and close_ > support * 1.08:
+        swing += 1
+
+    # Bandarmology proxy
+    bandarmology = 0
+    phase = get_phase(df)
+    if phase == "BIG AKUM":
+        bandarmology += 4
+    elif phase == "AKUM":
+        bandarmology += 2
+    elif phase == "DIST":
+        bandarmology -= 2
+    elif phase == "BIG DIST":
+        bandarmology -= 4
+    if volume > vol_ma20 * 1.2:
+        bandarmology += 2
+    if close_ > ma20:
+        bandarmology += 1
+
+    return {
+        "scalping": scalping,
+        "bsjp": bsjp,
+        "swing": swing,
+        "bandarmology": bandarmology
+    }
+
+
+def build_row(symbol: str, daily_df: pd.DataFrame, intraday_5m: pd.DataFrame):
+    df = calc_indicators(daily_df)
+
+    if len(df) < 30:
         return None
 
-# =========================================
-# LOGIKA STRATEGI
-# =========================================
-def analyze_scalping(df):
-    score = 0
-    reasons = []
+    close_ = latest(df["Close"])
+    prev_close = float(df["Close"].iloc[-2]) if len(df) > 1 else close_
+    gain = ((close_ - prev_close) / prev_close * 100) if prev_close else 0.0
+    wick = latest(df["WICK_PCT"])
+    rsi = latest(df["RSI"])
+    macd = latest(df["MACD"])
+    macd_signal = latest(df["MACD_SIGNAL"])
+    vol = latest(df["Volume"])
+    vol_ma20 = latest(df["VOL_MA20"])
+    close_ma20 = latest(df["MA20"])
+    ma50 = latest(df["MA50"])
+    support = latest(df["SUPPORT20"])
+    resistance = latest(df["RESIST20"])
+    atr = latest(df["ATR14"])
 
-    close = safe_float(df["Close"])
-    ema9 = safe_float(df["EMA9"])
-    ma20 = safe_float(df["MA20"])
-    rsi = safe_float(df["RSI"])
-    macd = safe_float(df["MACD"])
-    signal = safe_float(df["MACD_SIGNAL"])
-    vol = safe_float(df["Volume"])
-    vol_ma5 = safe_float(df["VOL_MA5"])
-    resist = safe_float(df["RESIST20"])
+    rvol = (vol / vol_ma20 * 100) if vol_ma20 and not pd.isna(vol_ma20) else np.nan
 
-    if close and ema9 and ma20:
-        if close > ema9 > ma20:
-            score += 3
-            reasons.append("Harga di atas EMA9 dan MA20, momentum cepat naik")
-        elif close < ema9 < ma20:
-            score -= 2
-            reasons.append("Harga di bawah EMA9 dan MA20")
+    entry = round((support + close_ma20) / 2) if not pd.isna(support) and not pd.isna(close_ma20) else close_
+    now_price = close_
+    tp = round(close_ + (atr * 2)) if not pd.isna(atr) else close_ * 1.04
+    sl = round(close_ - atr) if not pd.isna(atr) else close_ * 0.97
 
-    if rsi is not None:
-        if 55 <= rsi <= 70:
-            score += 2
-            reasons.append("RSI mendukung momentum scalping")
-        elif rsi > 75:
-            score -= 1
-            reasons.append("RSI terlalu tinggi, rawan profit taking")
+    profit = ((now_price - entry) / entry * 100) if entry else 0.0
+    to_tp = ((tp - now_price) / now_price * 100) if now_price else 0.0
 
-    if macd is not None and signal is not None:
-        if macd > signal:
-            score += 2
-            reasons.append("MACD di atas signal")
-        else:
-            score -= 1
-            reasons.append("MACD di bawah signal")
+    intraday_rsi = np.nan
+    if not intraday_5m.empty and "Close" in intraday_5m.columns:
+        intra = calc_indicators(intraday_5m.copy())
+        intraday_rsi = latest(intra["RSI"])
 
-    if vol and vol_ma5:
-        if vol > vol_ma5:
-            score += 2
-            reasons.append("Volume di atas rata-rata 5 hari")
-        else:
-            score -= 1
-            reasons.append("Volume belum kuat")
+    rsi_sig = get_rsi_signal(rsi, macd, macd_signal)
+    trend = get_trend(close_, close_ma20, ma50)
+    phase = get_phase(df)
+    signal_label = get_signal_label(close_, close_ma20, rsi, macd, macd_signal, vol, vol_ma20, support, resistance)
+    action_label = get_action_label(signal_label, close_, entry, tp, sl, trend)
+    value = transaction_value(close_, vol)
 
-    if close and resist:
-        if close >= resist * 0.98:
-            score += 1
-            reasons.append("Harga dekat area breakout")
+    strat = compute_strategy_scores(df)
+    total_score = strat["scalping"] + strat["bsjp"] + strat["swing"] + strat["bandarmology"]
 
-    return score, reasons
+    return {
+        "symbol": symbol.replace(".JK", ""),
+        "full_symbol": symbol,
+        "gain": gain,
+        "wick": wick,
+        "aksi": action_label,
+        "sinyal": signal_label,
+        "rvol": rvol,
+        "entry": entry,
+        "now": now_price,
+        "tp": tp,
+        "sl": sl,
+        "profit": profit,
+        "to_tp": to_tp,
+        "rsi_sig": rsi_sig,
+        "rsi_5m": intraday_rsi,
+        "val": value,
+        "fase": phase,
+        "trend": trend,
+        "score_scalping": strat["scalping"],
+        "score_bsjp": strat["bsjp"],
+        "score_swing": strat["swing"],
+        "score_bandar": strat["bandarmology"],
+        "score_total": total_score,
+        "daily_df": df
+    }
 
-def analyze_bsjp(df):
-    # Asumsi BSJP = Buy Saat Jenuh Penurunan / buy on weakness
-    score = 0
-    reasons = []
 
-    close = safe_float(df["Close"])
-    bb_lower = safe_float(df["BB_LOWER"])
-    ma20 = safe_float(df["MA20"])
-    rsi = safe_float(df["RSI"])
-    macd_hist = safe_float(df["MACD_HIST"])
-    support = safe_float(df["SUPPORT20"])
-    prev_close = float(df["Close"].iloc[-2]) if len(df) > 1 else close
-
-    if rsi is not None:
-        if rsi < 35:
-            score += 3
-            reasons.append("RSI rendah, saham mulai jenuh turun")
-        elif 35 <= rsi <= 45:
-            score += 1
-            reasons.append("RSI masih di area bawah")
-
-    if close and bb_lower:
-        if close <= bb_lower * 1.03:
-            score += 2
-            reasons.append("Harga dekat lower Bollinger Band")
-
-    if close and support:
-        if close <= support * 1.05:
-            score += 2
-            reasons.append("Harga dekat support 20 hari")
-
-    if macd_hist is not None:
-        if macd_hist > 0:
-            score += 2
-            reasons.append("Histogram MACD mulai positif, ada tanda rebound")
-        else:
-            reasons.append("Histogram MACD belum positif")
-
-    if close and prev_close:
-        if close > prev_close:
-            score += 1
-            reasons.append("Harga mulai rebound dari penurunan")
-
-    if close and ma20 and close > ma20:
-        score -= 1
-        reasons.append("Harga sudah jauh dari area buy on weakness")
-
-    return score, reasons
-
-def analyze_swing(df):
-    score = 0
-    reasons = []
-
-    close = safe_float(df["Close"])
-    ma20 = safe_float(df["MA20"])
-    ma50 = safe_float(df["MA50"])
-    rsi = safe_float(df["RSI"])
-    macd = safe_float(df["MACD"])
-    signal = safe_float(df["MACD_SIGNAL"])
-    vol = safe_float(df["Volume"])
-    vol_ma20 = safe_float(df["VOL_MA20"])
-    resist = safe_float(df["RESIST20"])
-    support = safe_float(df["SUPPORT20"])
-
-    if close and ma20 and ma50:
-        if close > ma20 > ma50:
-            score += 3
-            reasons.append("Trend swing naik: Close > MA20 > MA50")
-        elif close < ma20 < ma50:
-            score -= 2
-            reasons.append("Trend swing turun")
-
-    if rsi is not None:
-        if 50 <= rsi <= 65:
-            score += 2
-            reasons.append("RSI sehat untuk swing")
-        elif rsi > 75:
-            score -= 1
-            reasons.append("RSI terlalu tinggi")
-
-    if macd is not None and signal is not None:
-        if macd > signal:
-            score += 2
-            reasons.append("MACD bullish crossover / di atas signal")
-        else:
-            score -= 1
-            reasons.append("MACD melemah")
-
-    if vol and vol_ma20:
-        if vol > vol_ma20:
-            score += 1
-            reasons.append("Volume mendukung tren")
-
-    if close and support and resist and resist > support:
-        pos = (close - support) / (resist - support)
-        if 0.4 <= pos <= 0.8:
-            score += 1
-            reasons.append("Posisi harga masih ideal untuk swing")
-        elif pos > 0.9:
-            score -= 1
-            reasons.append("Harga sudah dekat resistance")
-
-    return score, reasons
-
-def analyze_bandarmology(df):
-    # Pendekatan sederhana, bukan broker summary asli
-    score = 0
-    reasons = []
-
-    close = safe_float(df["Close"])
-    ma20 = safe_float(df["MA20"])
-    vol = safe_float(df["Volume"])
-    vol_ma20 = safe_float(df["VOL_MA20"])
-    resist = safe_float(df["RESIST20"])
-
-    recent_up_days = (df["RET"].tail(10) > 0).sum()
-    recent_down_days = (df["RET"].tail(10) < 0).sum()
-
-    # Money flow proxy sederhana
-    acc_dist_score = 0
-    recent = df.tail(10).copy()
-    for _, row in recent.iterrows():
-        if row["Close"] > row["Open"] and row["Volume"] > row["VOL_MA20"]:
-            acc_dist_score += 1
-        elif row["Close"] < row["Open"] and row["Volume"] > row["VOL_MA20"]:
-            acc_dist_score -= 1
-
-    if acc_dist_score >= 3:
-        score += 3
-        reasons.append("Terlihat akumulasi: candle naik dengan volume besar lebih dominan")
-    elif acc_dist_score <= -3:
-        score -= 3
-        reasons.append("Terlihat distribusi: candle turun dengan volume besar lebih dominan")
-
-    if close and ma20:
-        if close > ma20:
-            score += 1
-            reasons.append("Harga bertahan di atas MA20")
-
-    if vol and vol_ma20:
-        if vol > vol_ma20 * 1.2:
-            score += 2
-            reasons.append("Lonjakan volume di atas rata-rata 20 hari")
-
-    if close and resist:
-        if close >= resist * 0.99:
-            score += 1
-            reasons.append("Harga mendekati / menembus resistance, potensi markup")
-
-    if recent_up_days > recent_down_days:
-        score += 1
-        reasons.append("Hari hijau lebih dominan dalam 10 sesi terakhir")
-
-    return score, reasons
-
-def get_recommendation(score):
-    if score >= 7:
-        return "SANGAT MENARIK"
-    elif score >= 5:
-        return "MENARIK"
-    elif score >= 3:
-        return "CUKUP MENARIK"
-    elif score >= 1:
-        return "PANTAU"
-    else:
-        return "KURANG MENARIK"
-
-# =========================================
-# SCREENING
-# =========================================
 @st.cache_data(ttl=300)
-def screen_stocks(symbols, period="6mo", interval="1d"):
+def run_screener(symbols, daily_period, daily_interval):
     rows = []
-
     for symbol in symbols:
         try:
-            df = load_stock_data(symbol, period, interval)
-            if df.empty or len(df) < 60:
+            daily = get_ohlcv(symbol, period=daily_period, interval=daily_interval)
+            if daily.empty:
                 continue
-
-            close = safe_float(df["Close"])
-            rsi = safe_float(df["RSI"])
-            vol = safe_float(df["Volume"])
-
-            s_score, _ = analyze_scalping(df)
-            b_score, _ = analyze_bsjp(df)
-            sw_score, _ = analyze_swing(df)
-            bd_score, _ = analyze_bandarmology(df)
-
-            total_score = s_score + b_score + sw_score + bd_score
-
-            rows.append({
-                "Symbol": symbol,
-                "Close": round(close, 2) if close else None,
-                "RSI": round(rsi, 2) if rsi is not None else None,
-                "Volume": int(vol) if vol is not None else None,
-                "Scalping": s_score,
-                "BSJP": b_score,
-                "Swing": sw_score,
-                "Bandarmologi": bd_score,
-                "Total": total_score,
-                "Rekomendasi": get_recommendation(total_score)
-            })
-        except:
+            intra5 = get_intraday_5m(symbol)
+            row = build_row(symbol, daily, intra5)
+            if row is not None:
+                rows.append(row)
+        except Exception:
             continue
 
     if not rows:
         return pd.DataFrame()
 
-    result = pd.DataFrame(rows).sort_values("Total", ascending=False).reset_index(drop=True)
-    return result
+    return pd.DataFrame(rows).sort_values("score_total", ascending=False).reset_index(drop=True)
 
-# =========================================
-# SIDEBAR
-# =========================================
-menu = st.sidebar.radio("Pilih Menu", ["Dashboard", "Analisa Saham"])
 
-# =========================================
-# DASHBOARD
-# =========================================
-if menu == "Dashboard":
-    st.title("📊 Dashboard Utama")
-    st.subheader("Aplikasi Analisa Saham Multi-Strategi")
+# =========================================================
+# COLOR ENGINE
+# =========================================================
+def bg_gain(v):
+    if pd.isna(v):
+        return "#233246"
+    if v > 2:
+        return "#12b76a"
+    if v > 0:
+        return "#2d8f61"
+    if v > -2:
+        return "#d92d20"
+    return "#a61b15"
 
-    st.markdown("""
-    Aplikasi ini membagi analisa saham menjadi beberapa strategi:
 
-    **1. Scalping**  
-    Fokus pada momentum cepat, breakout, volume, dan RSI jangka pendek.
+def bg_wick(v):
+    if pd.isna(v):
+        return "#233246"
+    if v < 1:
+        return "#0b7a75"
+    if v < 2.5:
+        return "#1f6feb"
+    if v < 4:
+        return "#d97706"
+    return "#ef4444"
 
-    **2. BSJP**  
-    Asumsi logika: *buy saat jenuh penurunan / buy on weakness* menggunakan RSI rendah,
-    lower Bollinger Band, support, dan tanda rebound.
 
-    **3. Swing**  
-    Fokus pada tren menengah menggunakan MA20, MA50, MACD, dan volume.
+def bg_aksi(v):
+    mapping = {
+        "AT ENTRY": "#1d4ed8",
+        "WATCH": "#b45309",
+        "WAIT GC": "#374151",
+        "HOLD": "#2563eb",
+        "SIAP BELI": "#7c3aed"
+    }
+    return mapping.get(v, "#334155")
 
-    **4. Bandarmologi Sederhana**  
-    Pendekatan akumulasi/distribusi berbasis harga dan volume.
-    """)
 
-    st.info("Masuk ke menu **Analisa Saham** untuk melihat ranking saham terbaik dan chart detail.")
+def bg_sinyal(v):
+    mapping = {
+        "ON TRACK": "#16a34a",
+        "REBOUND": "#d97706",
+        "AKUM": "#2e8b57",
+        "DIST": "#b91c1c",
+        "SUPER": "#7e22ce",
+        "WAIT": "#111827"
+    }
+    return mapping.get(v, "#334155")
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Strategi", "4")
-    c2.metric("Screening", "Otomatis")
-    c3.metric("Data", "Yahoo Finance")
-    c4.metric("Mode", "Real-Time")
 
-# =========================================
-# ANALISA SAHAM
-# =========================================
-elif menu == "Analisa Saham":
-    st.title("📈 Analisa Saham Multi-Strategi")
+def bg_rvol(v):
+    if pd.isna(v):
+        return "#233246"
+    if v >= 200:
+        return "#8b5cf6"
+    if v >= 120:
+        return "#f97316"
+    if v >= 80:
+        return "#1d4ed8"
+    return "#374151"
 
-    col_a, col_b, col_c = st.columns([2, 1, 1])
 
-    with col_a:
-        selected_symbol = st.selectbox("Pilih saham untuk analisa detail", DEFAULT_STOCKS, index=0)
+def bg_price(v, ref=None, kind="normal"):
+    if pd.isna(v):
+        return "#233246"
+    if kind == "tp":
+        return "#16a34a"
+    if kind == "sl":
+        return "#b91c1c"
+    if kind == "entry":
+        return "#1d4ed8"
+    if kind == "now":
+        return "#2563eb"
+    return "#233246"
 
-    with col_b:
-        period = st.selectbox("Periode", ["3mo", "6mo", "1y", "2y"], index=1)
 
-    with col_c:
-        interval = st.selectbox("Interval", ["1d", "1wk"], index=0)
+def bg_profit(v):
+    if pd.isna(v):
+        return "#233246"
+    if v > 2:
+        return "#16a34a"
+    if v > 0:
+        return "#0f766e"
+    if v > -2:
+        return "#92400e"
+    return "#b91c1c"
 
-    st.markdown("### 🏆 Rekomendasi Saham Tertinggi")
 
-    screening_df = screen_stocks(DEFAULT_STOCKS, period=period, interval=interval)
+def bg_to_tp(v):
+    if pd.isna(v):
+        return "#233246"
+    if v <= 1:
+        return "#f97316"
+    if v <= 3:
+        return "#16a34a"
+    return "#0f766e"
 
-    if screening_df.empty:
-        st.error("Screening tidak berhasil mengambil data saham.")
-        st.stop()
 
-    top_n = st.slider("Jumlah rekomendasi yang ditampilkan", 3, min(10, len(screening_df)), 5)
-    top_df = screening_df.head(top_n)
+def bg_rsi_sig(v):
+    mapping = {
+        "UP": "#16a34a",
+        "DEAD": "#dc2626",
+        "GOLDEN": "#7c3aed",
+        "WAIT": "#111827"
+    }
+    return mapping.get(v, "#334155")
 
-    st.dataframe(top_df, use_container_width=True)
 
-    st.markdown("### 📌 Top 3 Saham Terbaik")
-    top3 = top_df.head(3)
-    cols = st.columns(len(top3))
-    for i, (_, row) in enumerate(top3.iterrows()):
-        with cols[i]:
-            st.metric(row["Symbol"], f"{row['Close']}")
-            st.write(f"Total Score: **{row['Total']}**")
-            st.write(f"Rekomendasi: **{row['Rekomendasi']}**")
+def bg_rsi(v):
+    if pd.isna(v):
+        return "#233246"
+    if v >= 70:
+        return "#f59e0b"
+    if v >= 55:
+        return "#16a34a"
+    if v >= 45:
+        return "#2563eb"
+    return "#7c3aed"
 
-    # DETAIL SAHAM
-    df = load_stock_data(selected_symbol, period, interval)
-    if df.empty:
-        st.error("Data saham detail tidak ditemukan.")
-        st.stop()
 
-    last_close = safe_float(df["Close"])
-    last_rsi = safe_float(df["RSI"])
-    support = safe_float(df["SUPPORT20"])
-    resistance = safe_float(df["RESIST20"])
-    macd = safe_float(df["MACD"])
+def bg_fase(v):
+    mapping = {
+        "BIG AKUM": "#9333ea",
+        "AKUM": "#16a34a",
+        "NEUTRAL": "#374151",
+        "DIST": "#dc2626",
+        "BIG DIST": "#b91c1c"
+    }
+    return mapping.get(v, "#334155")
 
-    st.markdown(f"## 🔍 Detail Analisa: {selected_symbol}")
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Harga Terakhir", f"{last_close:,.2f}" if last_close else "-")
-    m2.metric("RSI", f"{last_rsi:.2f}" if last_rsi is not None else "-")
-    m3.metric("Support", f"{support:,.2f}" if support else "-")
-    m4.metric("Resistance", f"{resistance:,.2f}" if resistance else "-")
+def bg_trend(v):
+    mapping = {
+        "BULL": "#16a34a",
+        "BEAR": "#dc2626",
+        "NEUTRAL": "#6b7280"
+    }
+    return mapping.get(v, "#334155")
 
-    # PER STRATEGI
-    scalping_score, scalping_reasons = analyze_scalping(df)
-    bsjp_score, bsjp_reasons = analyze_bsjp(df)
-    swing_score, swing_reasons = analyze_swing(df)
-    bandar_score, bandar_reasons = analyze_bandarmology(df)
 
-    st.markdown("## 📋 Analisa per Point Strategi")
+# =========================================================
+# TABLE RENDER
+# =========================================================
+def make_html_table(df: pd.DataFrame, title: str):
+    html = f"""
+    <div class="screen-box">
+        <div class="screener-title">{title}</div>
+        <table class="custom-table">
+            <thead>
+                <tr>
+                    <th>EMITEN</th>
+                    <th>GAIN</th>
+                    <th>WICK</th>
+                    <th>AKSI</th>
+                    <th>SINYAL</th>
+                    <th>RVOL</th>
+                    <th>ENTRY</th>
+                    <th>NOW</th>
+                    <th>TP</th>
+                    <th>SL</th>
+                    <th>PROFIT</th>
+                    <th>%TO TP</th>
+                    <th>RSI SIG</th>
+                    <th>RSI 5M</th>
+                    <th>VAL</th>
+                    <th>FASE</th>
+                    <th>TREND</th>
+                </tr>
+            </thead>
+            <tbody>
+    """
 
-    tab1, tab2, tab3, tab4 = st.tabs(["1. Scalping", "2. BSJP", "3. Swing", "4. Bandarmologi"])
+    for _, row in df.iterrows():
+        html += f"""
+        <tr>
+            <td style="background:#1d4ed8;color:#fff;">{row['symbol']}</td>
+            <td style="background:{bg_gain(row['gain'])};color:#fff;">{fmt_pct(row['gain'])}</td>
+            <td style="background:{bg_wick(row['wick'])};color:#fff;">{fmt_pct(row['wick'])}</td>
+            <td style="background:{bg_aksi(row['aksi'])};color:#fff;">{row['aksi']}</td>
+            <td style="background:{bg_sinyal(row['sinyal'])};color:#fff;">{row['sinyal']}</td>
+            <td style="background:{bg_rvol(row['rvol'])};color:#fff;">{fmt_pct(row['rvol'])}</td>
+            <td style="background:{bg_price(row['entry'], kind='entry')};color:#fff;">{fmt_price(row['entry'])}</td>
+            <td style="background:{bg_price(row['now'], kind='now')};color:#fff;">{fmt_price(row['now'])}</td>
+            <td style="background:{bg_price(row['tp'], kind='tp')};color:#fff;">{fmt_price(row['tp'])}</td>
+            <td style="background:{bg_price(row['sl'], kind='sl')};color:#fff;">{fmt_price(row['sl'])}</td>
+            <td style="background:{bg_profit(row['profit'])};color:#fff;">{fmt_pct(row['profit'])}</td>
+            <td style="background:{bg_to_tp(row['to_tp'])};color:#fff;">{fmt_pct(row['to_tp'])}</td>
+            <td style="background:{bg_rsi_sig(row['rsi_sig'])};color:#fff;">{row['rsi_sig']}</td>
+            <td style="background:{bg_rsi(row['rsi_5m'])};color:#fff;">{row['rsi_5m']:.1f if not pd.isna(row['rsi_5m']) else '-'}</td>
+            <td style="background:#183b69;color:#fff;">{human_value(row['val'])}</td>
+            <td style="background:{bg_fase(row['fase'])};color:#fff;">{row['fase']}</td>
+            <td style="background:{bg_trend(row['trend'])};color:#fff;">{row['trend']}</td>
+        </tr>
+        """
 
-    with tab1:
-        st.subheader("Scalping")
-        st.write("Logika: momentum cepat, volume naik, breakout, RSI dan MACD mendukung.")
-        st.metric("Skor Scalping", scalping_score)
-        st.write(f"Rekomendasi: **{get_recommendation(scalping_score)}**")
-        for i, reason in enumerate(scalping_reasons, 1):
-            st.write(f"{i}. {reason}")
+    html += """
+            </tbody>
+        </table>
+        <div class="footer-line">AKSI = tindakan trader | SINYAL = kondisi pasar | SL ≈ 1xATR | TP ≈ 2xATR | versi yfinance</div>
+    </div>
+    """
+    return html
 
-    with tab2:
-        st.subheader("BSJP")
-        st.write("Logika: buy saat jenuh penurunan / buy on weakness, mencari area support dan tanda rebound.")
-        st.metric("Skor BSJP", bsjp_score)
-        st.write(f"Rekomendasi: **{get_recommendation(bsjp_score)}**")
-        for i, reason in enumerate(bsjp_reasons, 1):
-            st.write(f"{i}. {reason}")
 
-    with tab3:
-        st.subheader("Swing")
-        st.write("Logika: mengikuti tren menengah, MA20/MA50, MACD bullish, volume mendukung.")
-        st.metric("Skor Swing", swing_score)
-        st.write(f"Rekomendasi: **{get_recommendation(swing_score)}**")
-        for i, reason in enumerate(swing_reasons, 1):
-            st.write(f"{i}. {reason}")
+# =========================================================
+# SCREENER GROUPING
+# =========================================================
+def split_screeners(df: pd.DataFrame):
+    high_prob = df.sort_values(
+        by=["score_total", "score_scalping", "score_swing"],
+        ascending=False
+    ).head(10)
 
-    with tab4:
-        st.subheader("Bandarmologi Sederhana")
-        st.write("Logika: pendekatan akumulasi/distribusi berbasis harga dan volume. Bukan broker summary asli.")
-        st.metric("Skor Bandarmologi", bandar_score)
-        st.write(f"Rekomendasi: **{get_recommendation(bandar_score)}**")
-        for i, reason in enumerate(bandar_reasons, 1):
-            st.write(f"{i}. {reason}")
+    rebound = df.sort_values(
+        by=["score_bsjp", "score_total"],
+        ascending=False
+    ).head(10)
 
-    total_score = scalping_score + bsjp_score + swing_score + bandar_score
-    st.markdown("## ✅ Kesimpulan Akhir")
-    st.success(f"Total Score {selected_symbol}: **{total_score}** — **{get_recommendation(total_score)}**")
+    trend = df.sort_values(
+        by=["score_swing", "score_bandar", "score_total"],
+        ascending=False
+    ).head(10)
 
-    # CHART
-    st.markdown("## 🕯️ Chart Saham")
+    return high_prob, rebound, trend
+
+
+# =========================================================
+# DETAIL CHART
+# =========================================================
+def show_detail_chart(row_df: pd.DataFrame, symbol_name: str):
+    st.subheader(f"Chart Detail: {symbol_name}")
 
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
-        x=df.index,
-        open=df["Open"],
-        high=df["High"],
-        low=df["Low"],
-        close=df["Close"],
+        x=row_df.index,
+        open=row_df["Open"],
+        high=row_df["High"],
+        low=row_df["Low"],
+        close=row_df["Close"],
         name="Candlestick"
     ))
-    fig.add_trace(go.Scatter(x=df.index, y=df["MA20"], mode="lines", name="MA20"))
-    fig.add_trace(go.Scatter(x=df.index, y=df["MA50"], mode="lines", name="MA50"))
-    fig.add_trace(go.Scatter(x=df.index, y=df["BB_UPPER"], mode="lines", name="BB Upper"))
-    fig.add_trace(go.Scatter(x=df.index, y=df["BB_LOWER"], mode="lines", name="BB Lower"))
-    fig.update_layout(height=600, xaxis_rangeslider_visible=False)
+    fig.add_trace(go.Scatter(x=row_df.index, y=row_df["MA20"], mode="lines", name="MA20"))
+    fig.add_trace(go.Scatter(x=row_df.index, y=row_df["MA50"], mode="lines", name="MA50"))
+    fig.add_trace(go.Scatter(x=row_df.index, y=row_df["BB_UPPER"], mode="lines", name="BB Upper"))
+    fig.add_trace(go.Scatter(x=row_df.index, y=row_df["BB_LOWER"], mode="lines", name="BB Lower"))
+    fig.update_layout(
+        height=560,
+        template="plotly_dark",
+        xaxis_rangeslider_visible=False,
+        margin=dict(l=20, r=20, t=40, b=20)
+    )
     st.plotly_chart(fig, use_container_width=True)
 
     c1, c2 = st.columns(2)
 
     with c1:
         fig_rsi = go.Figure()
-        fig_rsi.add_trace(go.Scatter(x=df.index, y=df["RSI"], mode="lines", name="RSI"))
+        fig_rsi.add_trace(go.Scatter(x=row_df.index, y=row_df["RSI"], mode="lines", name="RSI"))
         fig_rsi.add_hline(y=70, line_dash="dash")
         fig_rsi.add_hline(y=30, line_dash="dash")
-        fig_rsi.update_layout(height=300, title="RSI")
+        fig_rsi.update_layout(height=280, template="plotly_dark", title="RSI")
         st.plotly_chart(fig_rsi, use_container_width=True)
 
     with c2:
         fig_macd = go.Figure()
-        fig_macd.add_trace(go.Scatter(x=df.index, y=df["MACD"], mode="lines", name="MACD"))
-        fig_macd.add_trace(go.Scatter(x=df.index, y=df["MACD_SIGNAL"], mode="lines", name="Signal"))
-        fig_macd.add_trace(go.Bar(x=df.index, y=df["MACD_HIST"], name="Histogram"))
-        fig_macd.update_layout(height=300, title="MACD")
+        fig_macd.add_trace(go.Scatter(x=row_df.index, y=row_df["MACD"], mode="lines", name="MACD"))
+        fig_macd.add_trace(go.Scatter(x=row_df.index, y=row_df["MACD_SIGNAL"], mode="lines", name="Signal"))
+        fig_macd.add_trace(go.Bar(x=row_df.index, y=row_df["MACD_HIST"], name="Histogram"))
+        fig_macd.update_layout(height=280, template="plotly_dark", title="MACD")
         st.plotly_chart(fig_macd, use_container_width=True)
 
-    st.markdown("## 📄 Data Terakhir")
-    show_cols = [
-        "Open", "High", "Low", "Close", "Volume",
-        "MA20", "MA50", "RSI", "MACD", "MACD_SIGNAL",
-        "BB_UPPER", "BB_LOWER", "SUPPORT20", "RESIST20"
-    ]
-    st.dataframe(df[show_cols].tail(10), use_container_width=True)
 
-    st.caption(
-        "Catatan: hasil screening ini berbasis indikator teknikal otomatis. "
-        "Bandarmologi yang digunakan adalah pendekatan sederhana dari harga-volume, "
-        "bukan data broker summary asli."
+# =========================================================
+# UI
+# =========================================================
+st.title("HIGH PROB SCREENER V1.0 — YFINANCE VERSION")
+st.markdown('<div class="small-note">Tampilan dibuat mirip screener pada gambar, dengan logika berbasis price, volume, RSI, MACD, ATR, support-resistance, dan proxy bandarmologi.</div>', unsafe_allow_html=True)
+
+with st.sidebar:
+    st.header("Pengaturan")
+    period = st.selectbox("Periode", ["3mo", "6mo", "1y", "2y"], index=1)
+    interval = st.selectbox("Interval", ["1d", "1wk"], index=0)
+    custom_symbols = st.text_area(
+        "Daftar saham (pisahkan dengan koma)",
+        value=",".join(DEFAULT_SYMBOLS[:15]),
+        height=180
     )
+    run_btn = st.button("Jalankan Screener", use_container_width=True)
+
+symbols = [x.strip().upper() for x in custom_symbols.split(",") if x.strip()]
+if not symbols:
+    st.warning("Masukkan minimal 1 kode saham.")
+    st.stop()
+
+if run_btn or "loaded_once" not in st.session_state:
+    st.session_state["loaded_once"] = True
+    with st.spinner("Mengambil data saham dan menghitung screener..."):
+        screener_df = run_screener(symbols, period, interval)
+        st.session_state["screener_df"] = screener_df
+else:
+    screener_df = st.session_state.get("screener_df", pd.DataFrame())
+
+if screener_df.empty:
+    st.error("Tidak ada data yang berhasil diproses.")
+    st.stop()
+
+high_prob_df, rebound_df, trend_df = split_screeners(screener_df)
+
+st.markdown(make_html_table(high_prob_df, "HIGH PROB SCREENER — MOMENTUM & DAY TRADING"), unsafe_allow_html=True)
+st.markdown("<br>", unsafe_allow_html=True)
+st.markdown(make_html_table(rebound_df, "HIGH PROB SCREENER — REBOUND / BSJP"), unsafe_allow_html=True)
+st.markdown("<br>", unsafe_allow_html=True)
+st.markdown(make_html_table(trend_df, "HIGH PROB SCREENER — SWING / TREND"), unsafe_allow_html=True)
+
+st.markdown("---")
+st.subheader("Ranking Saham Tertinggi")
+
+rank_view = screener_df[[
+    "symbol", "gain", "rvol", "rsi_5m", "fase", "trend",
+    "score_scalping", "score_bsjp", "score_swing", "score_bandar", "score_total"
+]].copy()
+
+rank_view.columns = [
+    "EMITEN", "GAIN", "RVOL", "RSI 5M", "FASE", "TREND",
+    "SCALPING", "BSJP", "SWING", "BANDAR", "TOTAL"
+]
+st.dataframe(rank_view, use_container_width=True)
+
+selected_symbol = st.selectbox(
+    "Pilih saham untuk chart detail",
+    screener_df["full_symbol"].tolist()
+)
+
+selected_row = screener_df[screener_df["full_symbol"] == selected_symbol].iloc[0]
+selected_df = selected_row["daily_df"]
+
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric("EMITEN", selected_row["symbol"])
+c2.metric("TOTAL SCORE", f"{selected_row['score_total']}")
+c3.metric("SINYAL", selected_row["sinyal"])
+c4.metric("FASE", selected_row["fase"])
+c5.metric("TREND", selected_row["trend"])
+
+show_detail_chart(selected_df, selected_row["symbol"])
+
+st.subheader("Detail Analisa Strategi")
+
+t1, t2, t3, t4 = st.tabs(["Scalping", "BSJP", "Swing", "Bandarmologi"])
+
+with t1:
+    st.write("Logika scalping: momentum cepat, breakout, volume aktif, MACD bullish, RSI sehat.")
+    st.metric("Score Scalping", int(selected_row["score_scalping"]))
+    st.write(f"Entry: **{fmt_price(selected_row['entry'])}**")
+    st.write(f"TP: **{fmt_price(selected_row['tp'])}**")
+    st.write(f"SL: **{fmt_price(selected_row['sl'])}**")
+    st.write(f"Aksi: **{selected_row['aksi']}**")
+
+with t2:
+    st.write("Logika BSJP: buy saat jenuh penurunan, dekat support/lower band, mulai muncul rebound.")
+    st.metric("Score BSJP", int(selected_row["score_bsjp"]))
+    st.write(f"RSI 5M: **{selected_row['rsi_5m']:.2f if not pd.isna(selected_row['rsi_5m']) else '-'}**")
+    st.write(f"Sinyal: **{selected_row['sinyal']}**")
+
+with t3:
+    st.write("Logika swing: trend menengah, MA20/MA50, MACD, volume, dan posisi harga terhadap resistance.")
+    st.metric("Score Swing", int(selected_row["score_swing"]))
+    st.write(f"Trend: **{selected_row['trend']}**")
+    st.write(f"% to TP: **{fmt_pct(selected_row['to_tp'])}**")
+
+with t4:
+    st.write("Logika bandarmologi di versi ini adalah proxy price-volume, bukan broker summary asli.")
+    st.metric("Score Bandarmologi", int(selected_row["score_bandar"]))
+    st.write(f"Fase: **{selected_row['fase']}**")
+    st.write(f"Value transaksi: **{human_value(selected_row['val'])}**")
+
+st.caption("Catatan: versi ini dibuat dengan yfinance, sehingga beberapa komponen seperti broker summary, foreign flow, dan orderbook belum tersedia.")
