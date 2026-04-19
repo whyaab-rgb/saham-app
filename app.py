@@ -65,6 +65,19 @@ h1, h2, h3, h4, h5, h6, p, span, div, label {
 """, unsafe_allow_html=True)
 
 # =========================================================
+# HELPERS
+# =========================================================
+def normalize_jk_symbol(symbol: str) -> str:
+    s = symbol.strip().upper()
+    if not s:
+        return ""
+    if ":" in s:
+        return s
+    if not s.endswith(".JK"):
+        s = f"{s}.JK"
+    return s
+
+# =========================================================
 # DATA SOURCE
 # =========================================================
 @st.cache_data(ttl=300)
@@ -811,7 +824,7 @@ def show_detail_chart(df: pd.DataFrame, symbol_name: str):
 # =========================================================
 st.title("HIGH PROB SCREENER V1.2 — DAY TRADING & SWING")
 st.markdown(
-    '<div class="small-note">Versi perbaikan penuh: tabel custom sudah dirender dengan benar, tidak lagi tampil putih atau menampilkan HTML mentah.</div>',
+    '<div class="small-note">Versi lengkap dengan search emiten mandiri. Bisa tambah emiten ke watchlist atau analisa satu emiten saja.</div>',
     unsafe_allow_html=True
 )
 
@@ -820,6 +833,7 @@ st.markdown(
 # =========================================================
 with st.sidebar:
     st.header("Pengaturan")
+
     watchlist_name = st.selectbox("Preset Watchlist", list(WATCHLISTS.keys()), index=0)
     period = st.selectbox("Periode", ["3mo", "6mo", "1y", "2y"], index=1)
     interval = st.selectbox("Interval", ["1d", "1wk"], index=0)
@@ -827,25 +841,58 @@ with st.sidebar:
 
     default_symbols_text = ",".join(WATCHLISTS[watchlist_name]) if watchlist_name != "Custom" else ""
     custom_symbols = st.text_area(
-        "Daftar saham (pisahkan koma)",
+        "Daftar saham watchlist (pisahkan koma)",
         value=default_symbols_text,
-        height=180
+        height=160
+    )
+
+    st.markdown("---")
+    st.subheader("Search Emiten Mandiri")
+
+    single_symbol = st.text_input(
+        "Masukkan emiten",
+        placeholder="Contoh: BBCA atau BBCA.JK"
+    )
+
+    add_mode = st.radio(
+        "Mode pencarian",
+        ["Tambahkan ke watchlist", "Analisa emiten ini saja"],
+        index=0
     )
 
     run_btn = st.button("Jalankan Screener", use_container_width=True)
 
-symbols = [x.strip().upper() for x in custom_symbols.split(",") if x.strip()]
+# =========================================================
+# PARSE SYMBOLS
+# =========================================================
+watchlist_symbols = [normalize_jk_symbol(x) for x in custom_symbols.split(",") if x.strip()]
+watchlist_symbols = [x for x in watchlist_symbols if x]
+
+manual_symbol = normalize_jk_symbol(single_symbol) if single_symbol else ""
+
+if add_mode == "Tambahkan ke watchlist":
+    symbols = watchlist_symbols.copy()
+    if manual_symbol and manual_symbol not in symbols:
+        symbols.append(manual_symbol)
+else:
+    symbols = [manual_symbol] if manual_symbol else []
+
+symbols = list(dict.fromkeys(symbols))
+
 if not symbols:
-    st.warning("Masukkan minimal 1 kode saham.")
+    st.warning("Masukkan minimal 1 kode saham atau cari 1 emiten.")
     st.stop()
 
+# =========================================================
+# RUN
+# =========================================================
 if run_btn or "screener_df" not in st.session_state:
     with st.spinner("Mengambil data dan menyusun screener..."):
         st.session_state["screener_df"] = run_screener(symbols, period, interval)
 
 screener_df = st.session_state.get("screener_df", pd.DataFrame())
 if screener_df.empty:
-    st.error("Tidak ada data yang berhasil diproses.")
+    st.error("Tidak ada data yang berhasil diproses. Coba cek kode emiten yang dimasukkan.")
     st.stop()
 
 # =========================================================
